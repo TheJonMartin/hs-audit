@@ -74,7 +74,34 @@ Setup, once, in the HubSpot developer account: create the app, set the redirect 
 
 Tokens are kept in memory for the run and never written to disk. In this mode the bundle's `meta.oauth_scopes_granted` lists the scopes HubSpot actually granted (more reliable than the probe-based `scopes_granted`).
 
-Not built yet: a hosted callback receiver. The localhost redirect only completes when the approver's browser is on the machine running the tool, so a prospect installing on their own needs a hosted receiver that exchanges the code and hands us a token. That also means storing a refresh token, so settle the data-agreement and retention questions first.
+### Hosted receiver (Netlify)
+
+A prospect can install the app on their own: the Netlify receiver in `netlify/` catches HubSpot's redirect, exchanges the code, encrypts the refresh token to our public key and stores only the ciphertext in Netlify Blobs. `hubspot-audit run --auth oauth --state <state>` then fetches it once, decrypts it locally and deletes it from Netlify.
+
+```
+prospect admin --install link--> HubSpot --redirect--> Netlify /oauth/callback
+                                                         | exchange code, encrypt, store (Blobs)
+CLI: run --auth oauth --state S --> Netlify /api/token --> ciphertext (deleted on read, 24h expiry)
+                                    decrypt with local private key, hold in memory for the run
+```
+
+Setup, once:
+
+1. **Keys.** `hubspot-audit keygen` writes the private key to `~/.hubspot-audit/token_private.pem` (mode 600, never overwritten) and prints the public key. Back the private key up: without it stored tokens cannot be read.
+2. **Secrets.** Generate two random values, for example `openssl rand -hex 32`: `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`.
+3. **Netlify site.** Create a site from this repo (`netlify.toml` is at the root). Set these environment variables: `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` (`https://<site>/oauth/callback`), `STATE_SIGNING_SECRET`, `TOKEN_FETCH_SECRET`, `TOKEN_PUBLIC_KEY_PEM` (the printed public key), `ERROR_ROUTER_URL`, `FLOW_ID`, `FLOW_NAME`, `PLATFORM_NAME=OTHER`. Mark the secrets as secret in Netlify.
+4. **HubSpot app.** Register `https://<site>/oauth/callback` as the redirect URI.
+5. **Local `.env`.** Set `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`, `HUBSPOT_REDIRECT_URI` (same as `OAUTH_REDIRECT_URI`), `TOKEN_RECEIVER_URL` (`https://<site>`), `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`.
+
+Per prospect:
+
+1. `hubspot-audit install-url` prints a signed install link and a state value. Send the link with `prospect/install_instructions_oauth.md`.
+2. When the prospect confirms, `hubspot-audit run --auth oauth --state <state>`.
+3. If the run fails after the token is fetched, the token is already deleted from Netlify; the prospect must reinstall (about 5 minutes).
+
+Security properties: the state is HMAC-signed so the receiver rejects installs we did not create; Netlify holds only RSA-OAEP ciphertext, readable only with our private key; the fetch endpoint needs a bearer secret, reads once, and expires entries after 24 hours; no codes, tokens or HubSpot response bodies are logged or sent to the error router. During the callback the function briefly holds the plaintext token and client secret in memory. The prospect's access ends when they uninstall the app.
+
+Local tests: `cd netlify && npm install && npm test`. The Python suite also checks that Node-encrypted tokens decrypt in Python and that both sides compute the same state signature.
 
 ## Error handling
 
@@ -111,7 +138,7 @@ Beta endpoints: `/automation/v4/flows`, `/automation/v4/sequences`.
 
 ## Verification status (OAuth)
 
-OAuth flow tested against fakes only (refresh, 401 retry, state check, no secret in errors). Unconfirmed against HubSpot: whether `http://localhost` is accepted as a redirect URI, how required versus optional scopes are declared in the current developer platform, who can approve the install, any install cap before marketplace listing, and that `/oauth/v1/access-tokens/{token}` is still the introspection endpoint.
+OAuth flow and the Netlify receiver are tested against fakes only (refresh, 401 retry, state check, encryption round trip between Node and Python, no secret in errors). The function has not been deployed; the Netlify Blobs calls (`getStore`, `getWithMetadata`, `set`, `delete`) are written from memory of the API and unconfirmed against a live site. Unconfirmed against HubSpot: whether `http://localhost` is accepted as a redirect URI, how required versus optional scopes are declared in the current developer platform, who can approve the install, any install cap before marketplace listing, and that `/oauth/v1/access-tokens/{token}` is still the introspection endpoint.
 
 ## Verification status
 
@@ -143,7 +170,8 @@ Unit and integration tests pass against a fake portal (scopes denied, retries, p
 ## Repository layout
 
 ```
-src/hubspot_audit/   client.py, metrics.py, context.py, bundle.py, cli.py, categories/
+netlify/             OAuth receiver (Netlify Functions, JavaScript) and its tests
+src/hubspot_audit/   client.py, auth.py, receiver.py, metrics.py, context.py, bundle.py, cli.py, categories/
 schema/              audit_bundle.schema.json
 prompts/             live_audit_prompt.md (reference), bundle_audit_prompt.md
 prospect/            setup_instructions.md, scopes.md, screenshot_checklist.md

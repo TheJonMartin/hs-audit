@@ -25,3 +25,19 @@ jobs:
         run: pip-audit
       - name: Pre-commit mirror
         run: pre-commit run --all-files
+  netlify-receiver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        run: npm install --no-audit --no-fund
+        working-directory: netlify
+      - name: Tests
+        run: npm test
+        working-directory: netlify
+      - name: Security audit
+        run: npm audit --audit-level=high
+        working-directory: netlify

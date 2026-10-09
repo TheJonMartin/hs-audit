@@ -115,6 +115,11 @@ class OAuthAuth:
 
     # ---- AuthProvider ---------------------------------------------------------------------
 
+    def set_refresh_token(self, refresh_token: str) -> None:
+        """Supply a refresh token obtained elsewhere (for example, the hosted receiver)."""
+        self._refresh_token = refresh_token
+        self._access_token = None
+
     def authorization_header(self) -> str:
         return f"Bearer {self._valid_access_token()}"
 

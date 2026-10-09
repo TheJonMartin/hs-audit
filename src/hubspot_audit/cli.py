@@ -18,6 +18,12 @@ from .context import DEFAULT_SAMPLE_SIZE, AuditContext
 from .error_router import handle_failure, load_router_config
 from .errors import AuthError, HubSpotError
 from .probes import ACCOUNT_INFO_PATH, PROBES
+from .receiver import (
+    DEFAULT_KEY_PATH,
+    fetch_refresh_token,
+    generate_keypair,
+    new_signed_state,
+)
 from .scopes import OPTIONAL_SCOPES, REQUIRED_SCOPES
 
 logger = logging.getLogger("hubspot_audit")
@@ -72,8 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=AUTH_SERVICE_KEY,
         help="service-key (default) or oauth (public app install).",
     )
-    url = sub.add_parser("install-url", help="Print the OAuth install URL for the public app.")
-    url.add_argument("--state", default="manual")
+    run.add_argument(
+        "--state",
+        help="Install state from `install-url`; fetches the token the Netlify receiver stored.",
+    )
+    url = sub.add_parser(
+        "install-url", help="Create a signed install link for one prospect (hosted receiver)."
+    )
+    url.add_argument("--state", help="Reuse an existing state instead of creating one.")
+    sub.add_parser("keygen", help="Create the keypair that protects tokens stored by the receiver.")
     return parser
 
 
@@ -86,7 +99,7 @@ def execute_run(args: argparse.Namespace, context: dict) -> Path:
     numbers = parse_categories(args.categories, set(available))
 
     now = datetime.now(timezone.utc)
-    auth = build_auth(args.auth)
+    auth = build_auth(args.auth, getattr(args, "state", None))
     client = HubSpotClient(auth=auth)
     ctx = AuditContext(client=client, now=now, sample_size=args.sample_size)
 
@@ -135,12 +148,24 @@ def oauth_from_env() -> OAuthAuth:
     )
 
 
-def build_auth(mode: str) -> AuthProvider:
-    """Create the auth provider. OAuth uses HUBSPOT_REFRESH_TOKEN, else an interactive install."""
+def build_auth(mode: str, state: str | None = None) -> AuthProvider:
+    """Create the auth provider.
+
+    OAuth order: ``--state`` (token stored by the Netlify receiver), then HUBSPOT_REFRESH_TOKEN,
+    then an interactive localhost install.
+    """
     if mode == AUTH_SERVICE_KEY:
         return StaticKeyAuth(os.environ.get("HUBSPOT_SERVICE_KEY", ""))
     oauth = oauth_from_env()
-    if not os.environ.get("HUBSPOT_REFRESH_TOKEN"):
+    if state:
+        fetched = fetch_refresh_token(
+            os.environ.get("TOKEN_RECEIVER_URL", ""),
+            os.environ.get("TOKEN_FETCH_SECRET", ""),
+            state,
+            Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH),
+        )
+        oauth.set_refresh_token(fetched["refresh_token"])
+    elif not os.environ.get("HUBSPOT_REFRESH_TOKEN"):
         run_loopback_flow(
             oauth,
             REQUIRED_SCOPES,
@@ -165,8 +190,19 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv_if_present()
     args = build_parser().parse_args(argv)
+    if args.command == "keygen":
+        public_pem = generate_keypair(
+            Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH)
+        )
+        print("Private key written (mode 600). Set this as TOKEN_PUBLIC_KEY_PEM in Netlify:\n")
+        print(public_pem)
+        return 0
     if args.command == "install-url":
-        print(oauth_from_env().authorization_url(REQUIRED_SCOPES, OPTIONAL_SCOPES, args.state))
+        state = args.state or new_signed_state(os.environ.get("STATE_SIGNING_SECRET", ""))
+        url = oauth_from_env().authorization_url(REQUIRED_SCOPES, OPTIONAL_SCOPES, state)
+        print(
+            f"Install URL (send to the prospect admin):\n{url}\n\nState (use with run --state):\n{state}"
+        )
         return 0
     router = load_router_config()
     context = {
