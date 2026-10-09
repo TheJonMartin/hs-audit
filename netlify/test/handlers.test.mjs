@@ -24,10 +24,10 @@ class Store {
   async list({ prefix }) { return { blobs: [...this.data.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) }; }
 }
 
-const hubspot = (calls = []) => async (url, init) => {
+const hubspot = (calls = [], opts = {}) => async (url, init) => {
   calls.push({ url: String(url), init });
-  if (String(url).includes("/oauth/v1/token")) return Response.json({ access_token: "at", refresh_token: "RT-SECRET-123", expires_in: 1800 });
-  if (String(url).includes("/access-tokens/")) return Response.json({ hub_id: 99, scopes: ["a", "b"], user: "someone@example.com" });
+  if (String(url).endsWith("/oauth/2026-03/token")) return Response.json({ access_token: "at", refresh_token: "RT-SECRET-123", expires_in: 1800, ...(opts.inToken ? { hub_id: 99, scopes: ["a", "b"] } : {}) });
+  if (String(url).endsWith("/oauth/2026-03/token/introspect")) return Response.json({ active: true, hub_id: 99, scopes: ["a", "b"], user: "someone@example.com" });
   return new Response("{}", { status: 200 });
 };
 const req = (path, headers = {}) => new Request(`https://x${path}`, { headers });
@@ -52,6 +52,21 @@ test("callback stores only ciphertext that the private key decrypts", async () =
   assert.equal(JSON.parse(plain).refresh_token, "RT-SECRET-123");
   assert.ok(!JSON.stringify(stored).includes("someone@example.com"));
   assert.equal(new URLSearchParams(calls[0].init.body).get("code"), "thecode");
+});
+
+test("callback uses hub_id and scopes from the token response without introspecting", async () => {
+  const store = new Store();
+  const calls = [];
+  await createCallbackHandler({ env: ENV, store, fetchImpl: hubspot(calls, { inToken: true }), now: () => 1 })(req(`/oauth/callback?code=c&state=${STATE}`));
+  assert.ok(store.data.has("portal/99"));
+  assert.ok(!calls.some((c) => c.url.endsWith("/introspect")));
+  const introspecting = [];
+  await createCallbackHandler({ env: ENV, store: new Store(), fetchImpl: hubspot(introspecting), now: () => 1 })(req(`/oauth/callback?code=c&state=${STATE}`));
+  const intro = introspecting.find((c) => c.url.endsWith("/introspect"));
+  const body = new URLSearchParams(intro.init.body);
+  assert.equal(body.get("token"), "at");
+  assert.equal(body.get("client_id"), "cid");
+  assert.ok(!introspecting.some((c) => c.url.includes("/oauth/v1/")));
 });
 
 test("callback rejects forged state, missing code, reuse; handles denial", async () => {

@@ -34,3 +34,11 @@ class ApiError(HubSpotError):
 
 class BundleValidationError(Exception):
     """The assembled bundle failed schema validation or the data-safety checks."""
+
+
+class ConfigError(Exception):
+    """The client config file is missing, malformed or unsafe."""
+
+
+class BatchError(Exception):
+    """One or more clients failed in a ``run --all`` batch. Each was already reported."""

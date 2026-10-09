@@ -72,13 +72,13 @@ class HubSpotClient:
         service_key: str | None = None,
         session: requests.Session | None = None,
         auth: AuthProvider | None = None,
-        sleep=time.sleep,
+        sleep=None,
         clock=time.monotonic,
     ) -> None:
         self._auth: AuthProvider = auth or StaticKeyAuth(service_key or "")
         self._session = session or requests.Session()
         self._session.headers.update({"Authorization": self._auth.authorization_header()})
-        self._sleep = sleep
+        self._sleep = sleep or time.sleep
         self._clock = clock
         self._last_call = 0.0
         self.call_log: list[CallRecord] = []

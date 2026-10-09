@@ -15,22 +15,28 @@ REDIRECT = "http://localhost:8765/callback"
 
 
 class TokenSession:
-    """Fake token endpoint. Each grant issues a numbered token valid for ``ttl`` seconds."""
+    """Fake token endpoints. Each grant issues a numbered token valid for ``ttl`` seconds."""
 
-    def __init__(self, ttl=1800, fail=False):
-        self.ttl, self.fail, self.posts, self.n = ttl, fail, [], 0
+    def __init__(self, ttl=1800, fail=False, hub_in_token=False):
+        self.ttl, self.fail, self.hub_in_token = ttl, fail, hub_in_token
+        self.posts, self.urls, self.n = [], [], 0
 
     def post(self, url, data=None, timeout=None):
         self.posts.append(data)
+        self.urls.append(url)
         if self.fail:
             return FakeResponse(400, {"message": "bad code SECRETCODE"})
+        if url.endswith("/token/introspect"):
+            return FakeResponse(
+                200, {"active": True, "hub_id": 99, "scopes": ["b", "a"], "user": "x@example.com"}
+            )
+        if url.endswith("/token/revoke"):
+            return FakeResponse(200, {})
         self.n += 1
-        return FakeResponse(
-            200, {"access_token": f"at-{self.n}", "refresh_token": "rt-1", "expires_in": self.ttl}
-        )
-
-    def get(self, url, timeout=None):
-        return FakeResponse(200, {"hub_id": 99, "scopes": ["b", "a"], "user": "x@example.com"})
+        body = {"access_token": f"at-{self.n}", "refresh_token": "rt-1", "expires_in": self.ttl}
+        if self.hub_in_token:
+            body.update({"hub_id": 77, "scopes": ["z"]})
+        return FakeResponse(200, body)
 
 
 def make(session=None, clock=None, refresh="rt-1"):
@@ -74,8 +80,37 @@ def test_no_refresh_token_raises():
         make(refresh=None).authorization_header()
 
 
-def test_token_info_keeps_only_hub_and_scopes():
-    assert make().token_info() == {"hub_id": 99, "scopes": ["a", "b"]}
+def test_endpoints_use_dated_oauth_version():
+    session = TokenSession()
+    make(session).token_info()
+    assert all("/oauth/2026-03/" in u for u in session.urls)
+    assert not any("/oauth/v1/" in u for u in session.urls)
+
+
+def test_token_info_falls_back_to_introspect_and_keeps_only_hub_and_scopes():
+    session = TokenSession()
+    assert make(session).token_info() == {"hub_id": 99, "scopes": ["a", "b"]}
+    assert session.urls[-1].endswith("/token/introspect")
+    assert (
+        session.posts[-1]["token"] == "at-1"
+        and session.posts[-1]["token_type_hint"] == "access_token"
+    )
+
+
+def test_token_info_prefers_values_returned_with_the_token():
+    session = TokenSession(hub_in_token=True)
+    assert make(session).token_info() == {"hub_id": 77, "scopes": ["z"]}
+    assert not any(u.endswith("/introspect") for u in session.urls)
+
+
+def test_revoke_posts_refresh_token_and_failure_is_an_auth_error():
+    session = TokenSession()
+    make(session).revoke_refresh_token()
+    assert session.urls[-1].endswith("/token/revoke") and session.posts[-1]["token"] == "rt-1"
+    with pytest.raises(AuthError):
+        make(TokenSession(fail=True)).revoke_refresh_token()
+    with pytest.raises(AuthError):
+        make(refresh=None).revoke_refresh_token()
 
 
 def test_secrets_list_covers_all_credentials():
@@ -151,9 +186,18 @@ def test_loopback_flow_rejects_state_mismatch():
     assert session.posts == []
 
 
-def test_loopback_requires_localhost_redirect():
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://example.com/cb",
+        "http://127.0.0.1:8765/cb",
+        "https://localhost:8765/cb",
+        "http://localhost/cb",
+    ],
+)
+def test_loopback_requires_http_localhost_with_port(uri):
     with pytest.raises(AuthError):
-        run_loopback_flow(make(), ["a"], [], "https://example.com/cb", announce=lambda _t: None)
+        run_loopback_flow(make(), ["a"], [], uri, announce=lambda _t: None)
     assert auth_mod.LOOPBACK_HOST == "127.0.0.1"
 
 

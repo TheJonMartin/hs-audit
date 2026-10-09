@@ -31,7 +31,7 @@ CONTACT_SAMPLE_PROPERTIES = [
     "hubspot_owner_id",
     "hs_analytics_source",
     "hs_analytics_source_data_1",
-    "hs_object_source",
+    "hs_object_source_label",
     "createdate",
     "hs_email_optout",
 ]

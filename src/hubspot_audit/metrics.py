@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .errors import AuthError, ForbiddenError, HubSpotError, UnsupportedError
@@ -117,8 +117,8 @@ def parse_hs_datetime(value: Any) -> datetime | None:
     text = str(value).strip()
     try:
         if text.isdigit():
-            return datetime.fromtimestamp(int(text) / MS_PER_SECOND, tz=timezone.utc)
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+            return datetime.fromtimestamp(int(text) / MS_PER_SECOND, tz=UTC)
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
     except (ValueError, OverflowError, OSError):
         return None
 

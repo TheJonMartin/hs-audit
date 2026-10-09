@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { handleFailure } from "./error_router.mjs";
 import { encryptPayload, safeEqual, verifyState } from "./security.mjs";
 
-const HUBSPOT_TOKEN_URL = "https://api.hubapi.com/oauth/v1/token";
-const HUBSPOT_INTROSPECT_URL = "https://api.hubapi.com/oauth/v1/access-tokens/";
+// Dated endpoints replace /oauth/v1/*, which HubSpot retires on 2027-02-16.
+const HUBSPOT_TOKEN_URL = "https://api.hubapi.com/oauth/2026-03/token";
+const HUBSPOT_INTROSPECT_URL = "https://api.hubapi.com/oauth/2026-03/token/introspect";
 const STATE_LOOKUP_TTL_MS = 24 * 60 * 60 * 1000; // an install link can be exchanged for a portal id for 24h
 const HTML = { "Content-Type": "text/html; charset=utf-8" };
 
@@ -60,15 +61,23 @@ export function createCallbackHandler({ env, store, fetchImpl = fetch, now = Dat
       });
 
       context.process_name = "Reading token info";
-      const info = await getJson(fetchImpl, HUBSPOT_INTROSPECT_URL + tokens.access_token);
-      const portal = String(info.hub_id ?? "");
+      // hub_id and scopes come back with the token; introspect only if they are missing.
+      const info = tokens.hub_id && tokens.scopes?.length
+        ? tokens
+        : await postForm(fetchImpl, HUBSPOT_INTROSPECT_URL, {
+            client_id: env.HUBSPOT_CLIENT_ID,
+            client_secret: env.HUBSPOT_CLIENT_SECRET,
+            token: tokens.access_token,
+            token_type_hint: "access_token",
+          });
+      const portal = String(info.hub_id ?? tokens.hub_id ?? "");
       if (!PORTAL_PATTERN.test(portal)) throw new Error("HubSpot token info did not include a portal id.");
       context.record_id = portal;
 
       context.process_name = "Encrypting and storing token";
       const stamp = now();
       const ciphertext = encryptPayload({ refresh_token: tokens.refresh_token }, env.TOKEN_PUBLIC_KEY_PEM);
-      await store.set(portalKey(portal), ciphertext, { metadata: { stored_at: stamp, installed_at: stamp, last_used: null, scopes: info.scopes ?? [] } });
+      await store.set(portalKey(portal), ciphertext, { metadata: { stored_at: stamp, installed_at: stamp, last_used: null, scopes: info.scopes ?? tokens.scopes ?? [] } });
       await store.set(stateKey(nonce), JSON.stringify({ hub_id: portal }), { metadata: { stored_at: stamp } });
       return page("Connected", "Process Pro Audit is connected. You can close this tab and let your Process Pro contact know.");
     } catch (error) {
@@ -159,11 +168,5 @@ async function postForm(fetchImpl, url, fields) {
   const response = await fetchImpl(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields), signal: AbortSignal.timeout(10000) });
   // Never include the response body in errors: it can echo the code or tokens.
   if (!response.ok) throw new Error(`HubSpot token exchange failed: HTTP ${response.status}`);
-  return response.json();
-}
-
-async function getJson(fetchImpl, url) {
-  const response = await fetchImpl(url, { signal: AbortSignal.timeout(10000) });
-  if (!response.ok) throw new Error(`HubSpot token info failed: HTTP ${response.status}`);
   return response.json();
 }

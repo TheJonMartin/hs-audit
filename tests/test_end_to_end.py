@@ -53,6 +53,7 @@ def test_full_run_validates_and_values(portal, tmp_path):
     assert m["workflows.routing_related"]["value"]["count"] == 1
     assert m["activity.owners_with_zero_activity_30d"]["value"] == ["Bo Idle"]
     assert m["emails.sent_90d.rates"]["value"]["open"] == 40.0
+    assert m["contacts.creation_source"]["value"]["manual_or_offline_pct"] == 50.0
     assert m["sequences.inventory"]["status"] == "unsupported"
     assert m["deals.renewals_next_60d"]["status"] == "ok"
     assert all(

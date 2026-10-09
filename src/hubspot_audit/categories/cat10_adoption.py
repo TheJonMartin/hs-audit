@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from ..context import STALE_DAYS_SHORT, AuditContext
-from ..metrics import days_since, distribution, safe
+from ..metrics import days_since, distribution, pct, safe
 from . import CategoryResult
 
 NUMBER = 10
 NAME = "Adoption"
 MANUAL_ITEMS = ["User last-login dates (same checklist item as Category 1)"]
 SOURCE = "/crm/v3/objects/{calls,meetings,emails,deals,contacts}/search"
-MANUAL_CREATION_SOURCES = ("CRM_UI", "IMPORT", "MOBILE_ANDROID", "MOBILE_IOS", "BATCH_UPDATE")
+# Values of hs_object_source_label (Record source) that mean a person created or loaded the record.
+MANUAL_CREATION_SOURCES = ("CRM_UI", "CRM_UI_BULK_ACTION", "IMPORT", "BATCH_UPDATE")
 
 
 def run(ctx: AuditContext) -> CategoryResult:
@@ -37,7 +38,12 @@ def run(ctx: AuditContext) -> CategoryResult:
 
     def creation_sources() -> dict:
         sample = ctx.contact_sample()
-        return distribution((r.get("properties") or {}).get("hs_object_source") for r in sample)
+        sources = [(r.get("properties") or {}).get("hs_object_source_label") for r in sample]
+        manual = sum(1 for v in sources if v in MANUAL_CREATION_SOURCES)
+        return {
+            "distribution": distribution(sources),
+            "manual_or_offline_pct": pct(manual, len(sample)),
+        }
 
     result.metrics.append(
         safe(

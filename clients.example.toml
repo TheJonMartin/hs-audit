@@ -1,0 +1,23 @@
+# Copy to clients.toml (gitignored) and edit. This file never holds credentials.
+
+[defaults]
+categories = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]   # which audit categories to run
+sample_size = 1000                              # contacts sampled for population/duplicate metrics
+output_dir = "output"
+
+# A client that installed the Process Pro public app. Its token is held by the receiver.
+# After the first install, find the portal id with `hubspot-audit clients` and add it here.
+[[clients]]
+name = "Acme Co"
+portal_id = "12345678"
+auth = "oauth"
+
+# A client audited with a read-only Service Key. Name the environment variable that holds
+# the key; never paste the key itself.
+[[clients]]
+name = "Globex"
+auth = "service-key"
+service_key_env = "GLOBEX_HUBSPOT_KEY"
+categories = [1, 3, 6]        # override the defaults for this client
+sample_size = 500
+enabled = false               # skipped by `run --all`

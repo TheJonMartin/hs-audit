@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
-NOW = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 SERVICE_KEY = "pat-na1-FAKE-KEY-0000"
 SECRET_EMAIL = "jane.doe@example.com"
 
@@ -35,7 +35,7 @@ def contact(i: int, **extra) -> dict:
         "company": "Acme" if i < 2 else f"Co{i}",
         "jobtitle": "VP" if i % 4 == 0 else "",
         "hs_analytics_source": "ORGANIC_SEARCH" if i % 2 else "",
-        "hs_object_source": "FORM" if i % 2 else "CRM_UI",
+        "hs_object_source_label": "FORM" if i % 2 else "CRM_UI",
         "createdate": iso(i),
     }
     props.update(extra)

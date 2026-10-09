@@ -1,9 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from hubspot_audit import metrics as m
 from hubspot_audit.errors import ForbiddenError
 
-NOW = datetime(2026, 10, 9, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
 
 def test_population_rates_and_pct():
@@ -22,7 +22,7 @@ def test_days_since_handles_iso_ms_and_junk():
     assert (
         round(
             m.days_since(
-                str(int(datetime(2026, 10, 8, tzinfo=timezone.utc).timestamp() * 1000)), NOW
+                str(int(datetime(2026, 10, 8, tzinfo=UTC).timestamp() * 1000)), NOW
             )
         )
         == 1
