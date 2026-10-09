@@ -1,6 +1,10 @@
 [build]
-  publish = "netlify/public"
-  functions = "netlify/functions"
+  base = "netlify"
+  publish = "public"
+  functions = "functions"
+
+[build.environment]
+  NODE_VERSION = "22"
 
 [functions]
   node_bundler = "esbuild"

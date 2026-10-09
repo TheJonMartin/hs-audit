@@ -30,3 +30,4 @@ output/*
 
 # Client list (confidential); copy clients.example.toml to clients.toml
 clients.toml
+.env.receiver

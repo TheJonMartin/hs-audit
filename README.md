@@ -127,13 +127,7 @@ Receiver endpoints (all need the bearer `TOKEN_FETCH_SECRET`):
 | `DELETE /api/token?portal=ID` | Offboard a client. |
 | `GET /api/clients` | List installed portals: install date, last use, scopes. No token material. |
 
-Setup, once:
-
-1. **Keys.** `hubspot-audit keygen` writes the private key to `~/.hubspot-audit/token_private.pem` (mode 600, never overwritten) and prints the public key. Back the private key up: without it stored tokens cannot be read. Any machine that runs scheduled audits needs this key (store it as a secret in that runner, never in the repo).
-2. **Secrets.** Generate two random values, for example `openssl rand -hex 32`: `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`.
-3. **Netlify site.** Create a site from this repo (`netlify.toml` is at the root). Set these environment variables: `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` (`https://<site>/oauth/callback`), `STATE_SIGNING_SECRET`, `TOKEN_FETCH_SECRET`, `TOKEN_PUBLIC_KEY_PEM` (the printed public key), `TOKEN_STORE_NAME=oauth-tokens` (**scope this to the Production context only**, see below), `ERROR_ROUTER_URL`, `FLOW_ID`, `FLOW_NAME`, `PLATFORM_NAME=OTHER`. Mark the secrets as secret in Netlify.
-4. **HubSpot app.** Register `https://<site>/oauth/callback` as the redirect URI.
-5. **Local `.env`.** Set `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`, `HUBSPOT_REDIRECT_URI` (same as `OAUTH_REDIRECT_URI`), `TOKEN_RECEIVER_URL` (`https://<site>`), `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`.
+Setup, once: follow `DEPLOY.md`. In short, `hubspot-audit setup --site-url https://<site>.netlify.app` generates the private key (mode 600; back it up, because without it stored tokens cannot be read), the two shared secrets, `.env.receiver` and the HubSpot app definition in `hubspot-app/`; `scripts/netlify_env.sh` pushes the variables to Netlify scoped to Production; `netlify deploy --prod` ships the functions; `hubspot-audit receiver-check` smoke-tests them. Any machine that runs scheduled audits needs the private key, `TOKEN_RECEIVER_URL`, `TOKEN_FETCH_SECRET`, `STATE_SIGNING_SECRET` and the HubSpot client ID and secret.
 
 Per client:
 
@@ -203,11 +197,14 @@ What was checked, how, and what is still open. "Docs" means HubSpot or Netlify d
 - Netlify Blobs: `set(key, data, { metadata })`, `getWithMetadata` returning `{ data, etag, metadata }`, `list({ prefix })` returning `{ blobs }`, and `delete` match the calls used. Reads are eventually consistent by default (up to 60 seconds), so the store is opened with `consistency: "strong"`. Stores are shared across deploy contexts (handled above).
 - Functions v2 `config` accepts `path` (string or array) and `method` (array).
 
+**Verified locally** (no network): the Netlify handlers run over real HTTP in `netlify/dev-server.mjs` with an in-memory store and a fake HubSpot, driven by the same Python client code the CLI uses: install callback, replay protection, list, fetch by state and by portal, rotation write-back, offboard, and `receiver-check`. This covers our wiring, not Netlify's routing or HubSpot's behavior.
+
 **Still unconfirmed:**
 
 - The exact introspect response schema (fields beyond `hub_id` and `scopes`; whether the token parameter is `token`) and the revoke request parameters. Revoke is best effort for that reason.
 - That `consistency: "strong"` is accepted as a `getStore` option in the installed `@netlify/blobs` version. If the first deploy rejects it, pass it per read instead.
 - How required versus optional scopes are declared in the current developer platform, who may approve an install, and the Service Key click path and scope names (`prospect/scopes.md`).
+- The HubSpot project format used in `hubspot-app/` (written from memory of the 2025.2 layout), the Netlify CLI flags in `scripts/netlify_env.sh`, and `hs project upload` behavior.
 - Every REST endpoint behavior listed under Known API gaps, and the Netlify function itself (never deployed).
 
 ## Verification status
@@ -240,7 +237,10 @@ Unit and integration tests pass against a fake portal (scopes denied, retries, p
 ## Repository layout
 
 ```
-netlify/             OAuth receiver (Netlify Functions, JavaScript) and its tests
+netlify/             OAuth receiver (Netlify Functions, JavaScript), local dev server and tests
+hubspot-app/         HubSpot app definition (uploaded with the HubSpot CLI)
+scripts/             netlify_env.sh (push receiver variables to Netlify)
+DEPLOY.md            Runbook: create the app, deploy, verify
 src/hubspot_audit/   client.py, auth.py, receiver.py, metrics.py, context.py, bundle.py, cli.py, categories/
 schema/              audit_bundle.schema.json
 prompts/             live_audit_prompt.md (reference), bundle_audit_prompt.md

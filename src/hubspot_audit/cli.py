@@ -39,6 +39,7 @@ from .receiver import (
     store_refresh_token,
 )
 from .scopes import OPTIONAL_SCOPES, REQUIRED_SCOPES
+from .setup import SetupError, receiver_check, run_setup
 
 logger = logging.getLogger("hubspot_audit")
 DEFAULT_REDIRECT_URI = "http://localhost:8765/callback"
@@ -131,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("clients", help="List configured clients with install status.")
     revoke = sub.add_parser("revoke", help="Offboard a client: revoke at HubSpot, delete our copy.")
     revoke.add_argument("--portal", required=True)
+    setup = sub.add_parser(
+        "setup", help="One-time receiver setup: keys, secrets, .env.receiver, app definition."
+    )
+    setup.add_argument("--site-url", required=True, help="Deployed Netlify origin, https only.")
+    setup.add_argument("--support-email", help="Support email for the HubSpot app listing.")
+    sub.add_parser("receiver-check", help="Smoke-test the deployed receiver.")
     sub.add_parser("keygen", help="Create the keypair that protects tokens stored by the receiver.")
     return parser
 
@@ -314,6 +321,42 @@ def _show_clients(args: argparse.Namespace) -> int:
     return 0
 
 
+def _setup(args: argparse.Namespace) -> int:
+    """Run setup and print names only, never secret values."""
+    try:
+        report = run_setup(
+            args.site_url,
+            args.support_email,
+            private_key_path=Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH),
+        )
+    except SetupError as exc:
+        print(f"Setup failed: {exc}")
+        return 1
+    print("Created: " + (", ".join(report.created) or "nothing"))
+    print("Kept:    " + (", ".join(report.kept) or "nothing"))
+    for note in report.notes:
+        print(f"Note:    {note}")
+    if report.blank_required:
+        print(
+            "Still blank in .env.receiver (fill in before deploying): "
+            + ", ".join(report.blank_required)
+        )
+    print("Next: see DEPLOY.md.")
+    return 0
+
+
+def _receiver_check() -> int:
+    """Smoke-test the receiver named by TOKEN_RECEIVER_URL."""
+    url, fetch_secret, _ = _receiver_settings()
+    if not url or not fetch_secret:
+        print("TOKEN_RECEIVER_URL and TOKEN_FETCH_SECRET are required.")
+        return 1
+    rows = receiver_check(url, fetch_secret)
+    for name, passed, detail in rows:
+        print(f"{'PASS' if passed else 'FAIL'}  {name} ({detail})")
+    return 0 if all(passed for _, passed, _ in rows) else 1
+
+
 def _revoke(portal: str) -> int:
     """Revoke the refresh token at HubSpot (best effort), then delete our stored copy."""
     url, fetch_secret, key_path = _receiver_settings()
@@ -370,6 +413,10 @@ def main(argv: list[str] | None = None) -> int:
         return _show_clients(args)
     if args.command == "revoke":
         return _revoke(args.portal)
+    if args.command == "setup":
+        return _setup(args)
+    if args.command == "receiver-check":
+        return _receiver_check()
     if args.command == "keygen":
         public_pem = generate_keypair(
             Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH)

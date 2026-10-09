@@ -1,0 +1,46 @@
+{
+  "uid": "process_pro_audit",
+  "type": "app",
+  "config": {
+    "name": "Process Pro Audit",
+    "description": "Read-only audit of your HubSpot portal's structure and usage. Process Pro Consulting reads totals and settings (never edits data) to produce a CRM health report.",
+    "distribution": "marketplace",
+    "auth": {
+      "type": "oauth",
+      "redirectUrls": [
+        "https://REPLACE-WITH-SITE.netlify.app/oauth/callback"
+      ],
+      "requiredScopes": [
+        "crm.objects.contacts.read",
+        "crm.objects.companies.read",
+        "crm.objects.deals.read",
+        "crm.objects.owners.read",
+        "crm.schemas.contacts.read",
+        "crm.schemas.companies.read",
+        "crm.schemas.deals.read",
+        "crm.lists.read",
+        "settings.users.read"
+      ],
+      "optionalScopes": [
+        "crm.objects.custom.read",
+        "crm.schemas.custom.read",
+        "forms",
+        "content",
+        "automation",
+        "communication_preferences.read"
+      ],
+      "conditionallyRequiredScopes": []
+    },
+    "permittedUrls": {
+      "fetch": [],
+      "iframe": [],
+      "img": []
+    },
+    "support": {
+      "supportEmail": "REPLACE-WITH-SUPPORT-EMAIL",
+      "documentationUrl": "https://REPLACE-WITH-DOCS-URL",
+      "supportUrl": "https://REPLACE-WITH-SUPPORT-URL",
+      "supportPhone": "+10000000000"
+    }
+  }
+}
