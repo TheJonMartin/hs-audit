@@ -204,7 +204,7 @@ What was checked, how, and what is still open. "Docs" means HubSpot or Netlify d
 - The exact introspect response schema (fields beyond `hub_id` and `scopes`; whether the token parameter is `token`) and the revoke request parameters. Revoke is best effort for that reason.
 - That `consistency: "strong"` is accepted as a `getStore` option in the installed `@netlify/blobs` version. If the first deploy rejects it, pass it per read instead.
 - How required versus optional scopes are declared in the current developer platform, who may approve an install, and the Service Key click path and scope names (`prospect/scopes.md`).
-- The HubSpot project format used in `hubspot-app/` (written from memory of the 2025.2 layout), the Netlify CLI flags in `scripts/netlify_env.sh`, and `hs project upload` behavior.
+- The HubSpot project definition in `hubspot-app/`. Field names and the allowed values (`marketplace`, `oauth`) match the `@hubspot/cli` 8.16 type definitions and `platformVersion` 2026.09 is the newest non-beta version the CLI knows, but validation fetches schemas from HubSpot and needs an authenticated account, so `hs project validate` has not been run. Also unconfirmed: the Netlify CLI flags in `scripts/netlify_env.sh`.
 - Every REST endpoint behavior listed under Known API gaps, and the Netlify function itself (never deployed).
 
 ## Verification status

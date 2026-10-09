@@ -38,6 +38,7 @@ This creates the private key (`~/.hubspot-audit/token_private.pem`, mode 600), `
 ```bash
 cd hubspot-app
 hs account auth          # choose your developer account
+hs project validate      # checks the definition against HubSpot's schemas before anything is uploaded
 hs project upload
 ```
 
@@ -92,7 +93,7 @@ You are done when all of these are true:
 
 None of the commands below have been run against real accounts from this repository. The likely first-deploy surprises, in order:
 
-1. **HubSpot project format.** The app definition follows the 2025.2 project layout from memory (`hsproject.json`, `app-hsmeta.json`). If `hs project upload` complains about a field, fix it in the file or use the UI fallback in step 3.
+1. **HubSpot project format.** The app definition's field names match the `@hubspot/cli` 8.16 type definitions (distribution, auth type, redirect URLs, required, optional and conditionally required scopes, support block), and `platformVersion` is 2026.09, the newest non-beta version that CLI knows. Its schema is fetched from HubSpot at validation time, so nothing could be checked offline. `hs project validate` is the first real check. The CLI's app type also lists a `logo` field; if validation says it is required, add a logo file and reference it. If a field is rejected, fix it in the file or use the UI fallback in step 3.
 2. **Netlify CLI flags.** `netlify env:set --context production --secret` is used for scoping and secrecy. If your CLI version rejects a flag, set the variables in the Netlify UI (Site configuration, Environment variables), scoped to Production.
 3. **Blobs consistency option.** `consistency: "strong"` in `netlify/functions/lib/store.mjs`. If the function errors on it, remove it and pass it per read instead.
 4. **Token introspect and revoke parameters.** Both are best effort; an error there does not block an install or a run.
