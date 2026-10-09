@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://processproconsulting.com/schemas/hubspot-audit-bundle.json",
+  "title": "HubSpot Audit Bundle",
+  "type": "object",
+  "required": ["meta", "categories"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": [
+        "prospect",
+        "portal_id",
+        "run_at",
+        "script_version",
+        "scopes_granted",
+        "categories_run"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "prospect": { "type": "string", "minLength": 1 },
+        "portal_id": { "type": ["string", "null"] },
+        "run_at": { "type": "string" },
+        "script_version": { "type": "string" },
+        "scopes_granted": { "type": "array", "items": { "type": "string" } },
+        "scope_probes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["area", "endpoint", "status"],
+            "properties": {
+              "area": { "type": "string" },
+              "endpoint": { "type": "string" },
+              "status": { "enum": ["ok", "empty", "forbidden", "unsupported", "error"] }
+            }
+          }
+        },
+        "categories_run": { "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 10 } },
+        "contact_sample_size": { "type": "integer", "minimum": 0 },
+        "csv_files": { "type": "array", "items": { "type": "string" } },
+        "csv_email_redactions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "categories": {
+      "type": "object",
+      "propertyNames": { "pattern": "^([1-9]|10)$" },
+      "additionalProperties": { "$ref": "#/$defs/category" }
+    }
+  },
+  "$defs": {
+    "category": {
+      "type": "object",
+      "required": ["name", "metrics", "manual_items"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "metrics": { "type": "array", "items": { "$ref": "#/$defs/metric" } },
+        "manual_items": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["key", "value", "unit", "source", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z0-9_.]+$" },
+        "value": {},
+        "unit": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["ok", "empty", "forbidden", "unsupported", "error"] },
+        "note": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "enum": ["forbidden", "unsupported", "error", "empty"] } } },
+          "then": { "properties": { "value": { "type": "null" } } }
+        }
+      ]
+    }
+  }
+}
