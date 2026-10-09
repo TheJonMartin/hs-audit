@@ -20,15 +20,18 @@ pip install -e ".[dev]"
 **1. Create the Netlify site** (empty for now; this fixes the URL).
 
 ```bash
+SITE=pick-a-unique-name        # your choice; the site URL becomes https://$SITE.netlify.app
 netlify login
-netlify sites:create --name <site-name>     # URL becomes https://<site-name>.netlify.app
-netlify link --name <site-name>
+netlify sites:create --name "$SITE"
+netlify link --name "$SITE"
 ```
+
+Keep the same terminal open for the next steps: they reuse `$SITE`. If you open a new one, set `SITE` again first. Never paste `<angle-bracket>` placeholders into zsh or bash: `<` is a redirect and the command fails with a parse error.
 
 **2. Generate keys and secrets, and point the app definition at the site.**
 
 ```bash
-hubspot-audit setup --site-url https://<site-name>.netlify.app --support-email <support address>
+hubspot-audit setup --site-url "https://$SITE.netlify.app" --support-email "support@yourcompany.com"
 ```
 
 This creates the private key (`~/.hubspot-audit/token_private.pem`, mode 600), `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`, writes `.env.receiver` (Netlify's variables) and adds the shared values to your local `.env`. It prints names only, never values. It is safe to re-run: nothing is rotated or overwritten. **Back up the private key now**; without it, stored client tokens cannot be read.
@@ -42,7 +45,7 @@ hs project validate      # checks the definition against HubSpot's schemas befor
 hs project upload
 ```
 
-In the developer account, open the app's Auth settings and copy the **Client ID** and **Client secret** into `.env.receiver` (`HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`). Also set `ERROR_ROUTER_URL` (and `FLOW_ID`) there. If `hs project upload` rejects the definition, create the app in the developer UI instead using the same name, the redirect URL `https://<site-name>.netlify.app/oauth/callback`, and the scopes listed in `src/hubspot_audit/scopes.py` (required and optional). Keep the distribution as marketplace, which allows 25 installs before listing.
+In the developer account, open the app's Auth settings and copy the **Client ID** and **Client secret** into `.env.receiver` (`HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`). Also set `ERROR_ROUTER_URL` (and `FLOW_ID`) there. If `hs project upload` rejects the definition, create the app in the developer UI instead using the same name, the redirect URL `https://YOUR-SITE.netlify.app/oauth/callback`, and the scopes listed in `src/hubspot_audit/scopes.py` (required and optional). Keep the distribution as marketplace, which allows 25 installs before listing.
 
 **4. Push the variables and deploy.**
 
@@ -71,10 +74,11 @@ Open the URL as a Super Admin of the portal, approve, and confirm the page says 
 
 ```bash
 hubspot-audit clients                                  # the portal ID appears as installed
-hubspot-audit run --prospect "Process Pro" --auth oauth --state <state> --categories 1,3
+STATE=paste-the-state-value-printed-above
+hubspot-audit run --prospect "Process Pro" --auth oauth --state "$STATE" --categories 1,3
 ```
 
-Add the portal to `clients.toml` using the `portal_id` the run prints. Later runs use `run --client <slug>`.
+Add the portal to `clients.toml` using the `portal_id` the run prints. Later runs use `run --client acme-co` (the client's slug).
 
 **Trying it without deploying.** `PORT=8787 node netlify/dev-server.mjs` (with the variables from `.env.receiver` exported) serves the real functions locally with an in-memory store and a fake HubSpot. It proves the wiring, not HubSpot's behavior. `pytest tests/test_local_receiver.py` does this automatically.
 
@@ -85,8 +89,8 @@ You are done when all of these are true:
 - [ ] `netlify deploy --prod` succeeded and `hubspot-audit receiver-check` prints five PASS lines.
 - [ ] The private key is backed up somewhere other than the machine that generated it.
 - [ ] A test install on a portal you control shows that portal in `hubspot-audit clients`.
-- [ ] `hubspot-audit run --auth oauth --portal <id>` completes, and the bundle's `meta.oauth_scopes_granted` matches the scopes in the app definition.
-- [ ] `hubspot-audit revoke --portal <id>` removes the portal from `clients`, and a following `run` fails with "not found".
+- [ ] `hubspot-audit run --prospect "Process Pro" --auth oauth --portal 12345678` (your portal ID) completes, and the bundle's `meta.oauth_scopes_granted` matches the scopes in the app definition.
+- [ ] `hubspot-audit revoke --portal 12345678` removes the portal from `clients`, and a following `run` fails with "not found".
 - [ ] In a Netlify deploy preview, `/api/clients` does not return client data (the production store name is not set there).
 
 ## What to expect to need fixing
