@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Environment
+.env
+.env.*
+!.env.example
+# Logs
+*.log
+logs/
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Build artifacts
+dist/
+build/
+*.egg-info/
+coverage/
+.coverage
+.pytest_cache/
+.ruff_cache/
+# Audit output (holds prospect data)
+output/*
+!output/.gitkeep
