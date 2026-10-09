@@ -4,7 +4,7 @@ import { encryptPayload, safeEqual, verifyState } from "./security.mjs";
 
 const HUBSPOT_TOKEN_URL = "https://api.hubapi.com/oauth/v1/token";
 const HUBSPOT_INTROSPECT_URL = "https://api.hubapi.com/oauth/v1/access-tokens/";
-const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // stored tokens expire after 24 hours
+const STATE_LOOKUP_TTL_MS = 24 * 60 * 60 * 1000; // an install link can be exchanged for a portal id for 24h
 const HTML = { "Content-Type": "text/html; charset=utf-8" };
 
 const page = (title, body, status = 200) =>
@@ -20,11 +20,15 @@ export function requireEnv(env, names) {
 }
 
 const CALLBACK_ENV = ["HUBSPOT_CLIENT_ID", "HUBSPOT_CLIENT_SECRET", "OAUTH_REDIRECT_URI", "STATE_SIGNING_SECRET", "TOKEN_PUBLIC_KEY_PEM", "ERROR_ROUTER_URL"];
-const FETCH_ENV = ["STATE_SIGNING_SECRET", "TOKEN_FETCH_SECRET", "ERROR_ROUTER_URL"];
+const TOKEN_ENV = ["STATE_SIGNING_SECRET", "TOKEN_FETCH_SECRET", "ERROR_ROUTER_URL"];
+const PORTAL_PATTERN = /^\d{1,20}$/;
+const portalKey = (id) => `portal/${id}`;
+const stateKey = (nonce) => `state/${nonce}`;
 
 /**
  * Create the OAuth callback handler. Exchanges the code, encrypts the refresh token to the
- * Process Pro public key and stores only the ciphertext. Logs no codes, tokens or response bodies.
+ * Process Pro public key and stores only the ciphertext under the portal id (a reinstall replaces
+ * the previous token). Logs no codes, tokens or response bodies.
  * @param {{env: object, store: object, fetchImpl?: Function, now?: Function}} deps
  */
 export function createCallbackHandler({ env, store, fetchImpl = fetch, now = Date.now }) {
@@ -42,7 +46,7 @@ export function createCallbackHandler({ env, store, fetchImpl = fetch, now = Dat
         return page("Invalid link", "This install link is not valid. Ask your Process Pro contact for a new one.", 400);
       }
       context.record_id = nonce;
-      if (await store.get(nonce, { type: "text" })) {
+      if (await store.get(stateKey(nonce), { type: "text" })) {
         return page("Already connected", "This install link has already been used.", 409);
       }
 
@@ -57,10 +61,15 @@ export function createCallbackHandler({ env, store, fetchImpl = fetch, now = Dat
 
       context.process_name = "Reading token info";
       const info = await getJson(fetchImpl, HUBSPOT_INTROSPECT_URL + tokens.access_token);
+      const portal = String(info.hub_id ?? "");
+      if (!PORTAL_PATTERN.test(portal)) throw new Error("HubSpot token info did not include a portal id.");
+      context.record_id = portal;
 
       context.process_name = "Encrypting and storing token";
+      const stamp = now();
       const ciphertext = encryptPayload({ refresh_token: tokens.refresh_token }, env.TOKEN_PUBLIC_KEY_PEM);
-      await store.set(nonce, ciphertext, { metadata: { stored_at: now(), hub_id: info.hub_id ?? null, scopes: info.scopes ?? [] } });
+      await store.set(portalKey(portal), ciphertext, { metadata: { stored_at: stamp, installed_at: stamp, last_used: null, scopes: info.scopes ?? [] } });
+      await store.set(stateKey(nonce), JSON.stringify({ hub_id: portal }), { metadata: { stored_at: stamp } });
       return page("Connected", "Process Pro Audit is connected. You can close this tab and let your Process Pro contact know.");
     } catch (error) {
       await handleFailure(env, error, context, fetchImpl);
@@ -70,32 +79,78 @@ export function createCallbackHandler({ env, store, fetchImpl = fetch, now = Dat
 }
 
 /**
- * Create the one-time token retrieval handler used by the CLI.
+ * Create the token-management handler used by the CLI and the scheduled runner.
+ *   GET    /api/token?portal=ID | ?state=S   read ciphertext (non-destructive; records last_used)
+ *   PUT    /api/token?portal=ID              replace ciphertext (HubSpot rotated the refresh token)
+ *   DELETE /api/token?portal=ID              offboard: delete the stored token
+ *   GET    /api/clients                      list installed portals (no ciphertext)
+ * Every call needs the bearer fetch secret.
  * @param {{env: object, store: object, fetchImpl?: Function, now?: Function}} deps
  */
-export function createFetchHandler({ env, store, fetchImpl = fetch, now = Date.now }) {
-  requireEnv(env, FETCH_ENV);
-  return async function fetchToken(request) {
-    const context = { process_name: "Authorizing token fetch", correlation_id: randomUUID() };
+export function createTokenHandler({ env, store, fetchImpl = fetch, now = Date.now }) {
+  requireEnv(env, TOKEN_ENV);
+  return async function tokens(request) {
+    const context = { process_name: "Authorizing token request", correlation_id: randomUUID() };
     try {
       const bearer = (request.headers.get("authorization") || "").replace(/^Bearer /, "");
       if (!safeEqual(bearer, env.TOKEN_FETCH_SECRET)) return json({ error: "unauthorized" }, 401);
-      const nonce = verifyState(new URL(request.url).searchParams.get("state"), env.STATE_SIGNING_SECRET);
-      if (!nonce) return json({ error: "invalid state" }, 400);
-      context.record_id = nonce;
+      const url = new URL(request.url);
 
-      context.process_name = "Reading stored token";
-      const entry = await store.getWithMetadata(nonce, { type: "text" });
-      if (!entry) return json({ error: "not found" }, 404);
-      await store.delete(nonce); // one-time read: gone whether or not it has expired
-      const storedAt = entry.metadata?.stored_at ?? 0;
-      if (now() - storedAt > TOKEN_TTL_MS) return json({ error: "expired" }, 410);
-      return json({ ciphertext: entry.data, hub_id: entry.metadata?.hub_id ?? null, scopes: entry.metadata?.scopes ?? [], stored_at: storedAt });
+      if (url.pathname.endsWith("/clients")) {
+        context.process_name = "Listing clients";
+        const { blobs } = await store.list({ prefix: "portal/" });
+        const clients = [];
+        for (const { key } of blobs) {
+          const entry = await store.getWithMetadata(key, { type: "text" });
+          if (entry) clients.push({ hub_id: key.slice("portal/".length), ...entry.metadata });
+        }
+        return json({ clients });
+      }
+
+      const portal = await resolvePortal(url, env, store, now);
+      if (portal.error) return json({ error: portal.error }, portal.status);
+      context.record_id = portal.id;
+      const key = portalKey(portal.id);
+
+      if (request.method === "GET") {
+        context.process_name = "Reading stored token";
+        const entry = await store.getWithMetadata(key, { type: "text" });
+        if (!entry) return json({ error: "not found" }, 404);
+        await store.set(key, entry.data, { metadata: { ...entry.metadata, last_used: now() } });
+        return json({ hub_id: portal.id, ciphertext: entry.data, scopes: entry.metadata?.scopes ?? [], installed_at: entry.metadata?.installed_at ?? null });
+      }
+      if (request.method === "PUT") {
+        context.process_name = "Replacing stored token";
+        const body = await request.json();
+        const entry = await store.getWithMetadata(key, { type: "text" });
+        if (!entry) return json({ error: "not found" }, 404);
+        if (typeof body.ciphertext !== "string" || !body.ciphertext) return json({ error: "ciphertext required" }, 400);
+        await store.set(key, body.ciphertext, { metadata: { ...entry.metadata, stored_at: now() } });
+        return json({ ok: true });
+      }
+      if (request.method === "DELETE") {
+        context.process_name = "Deleting stored token";
+        await store.delete(key);
+        return json({ ok: true });
+      }
+      return json({ error: "method not allowed" }, 405);
     } catch (error) {
       await handleFailure(env, error, context, fetchImpl);
       throw error;
     }
   };
+}
+
+/** Resolve `?portal=` or a signed `?state=` (valid 24h after install) to a portal id. */
+async function resolvePortal(url, env, store, now) {
+  const direct = url.searchParams.get("portal");
+  if (direct) return PORTAL_PATTERN.test(direct) ? { id: direct } : { error: "invalid portal", status: 400 };
+  const nonce = verifyState(url.searchParams.get("state"), env.STATE_SIGNING_SECRET);
+  if (!nonce) return { error: "invalid state", status: 400 };
+  const entry = await store.getWithMetadata(stateKey(nonce), { type: "text" });
+  if (!entry) return { error: "not found", status: 404 };
+  if (now() - (entry.metadata?.stored_at ?? 0) > STATE_LOOKUP_TTL_MS) return { error: "expired", status: 410 };
+  return { id: JSON.parse(entry.data).hub_id };
 }
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });

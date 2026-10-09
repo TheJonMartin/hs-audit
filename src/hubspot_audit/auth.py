@@ -67,6 +67,7 @@ class OAuthAuth:
         refresh_token: str | None = None,
         session: requests.Session | None = None,
         clock=time.time,
+        on_refresh_token_change=None,
     ) -> None:
         if not client_id or not client_secret:
             raise AuthError("HUBSPOT_CLIENT_ID and HUBSPOT_CLIENT_SECRET are required for OAuth.")
@@ -78,6 +79,7 @@ class OAuthAuth:
         self._expires_at = 0.0
         self._session = session or requests.Session()
         self._clock = clock
+        self._on_refresh_token_change = on_refresh_token_change
 
     # ---- install flow ---------------------------------------------------------------------
 
@@ -115,9 +117,13 @@ class OAuthAuth:
 
     # ---- AuthProvider ---------------------------------------------------------------------
 
-    def set_refresh_token(self, refresh_token: str) -> None:
-        """Supply a refresh token obtained elsewhere (for example, the hosted receiver)."""
+    def set_refresh_token(self, refresh_token: str, on_change=None) -> None:
+        """Supply a refresh token obtained elsewhere (for example, the hosted receiver).
+
+        ``on_change`` is called with a new refresh token if HubSpot ever rotates it.
+        """
         self._refresh_token = refresh_token
+        self._on_refresh_token_change = on_change
         self._access_token = None
 
     def authorization_header(self) -> str:
@@ -155,8 +161,13 @@ class OAuthAuth:
             raise AuthError(f"Token request failed: HTTP {response.status_code}")
         body = response.json()
         self._access_token = body["access_token"]
-        self._refresh_token = body.get("refresh_token", self._refresh_token)
+        new_refresh = body.get("refresh_token", self._refresh_token)
+        rotated = new_refresh != self._refresh_token
+        self._refresh_token = new_refresh
         self._expires_at = self._clock() + int(body.get("expires_in", 0))
+        if rotated and self._on_refresh_token_change:
+            # Losing a rotated token would break the next scheduled run, so a failure here is fatal.
+            self._on_refresh_token_change(new_refresh)
 
 
 def new_state() -> str:

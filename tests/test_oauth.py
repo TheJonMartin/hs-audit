@@ -155,3 +155,34 @@ def test_loopback_requires_localhost_redirect():
     with pytest.raises(AuthError):
         run_loopback_flow(make(), ["a"], [], "https://example.com/cb", announce=lambda _t: None)
     assert auth_mod.LOOPBACK_HOST == "127.0.0.1"
+
+
+def test_rotated_refresh_token_triggers_writeback_and_failure_is_fatal():
+    class Rotating(TokenSession):
+        def post(self, url, data=None, timeout=None):
+            self.posts.append(data)
+            return FakeResponse(
+                200, {"access_token": "at", "refresh_token": "rt-NEW", "expires_in": 1800}
+            )
+
+    seen = []
+    oauth = make(Rotating(), refresh="rt-1")
+    oauth.set_refresh_token("rt-1", on_change=seen.append)
+    oauth.authorization_header()
+    assert seen == ["rt-NEW"]
+
+    def boom(_token):
+        raise AuthError("writeback failed")
+
+    oauth2 = make(Rotating(), refresh="rt-1")
+    oauth2.set_refresh_token("rt-1", on_change=boom)
+    with pytest.raises(AuthError):
+        oauth2.authorization_header()
+
+
+def test_unchanged_refresh_token_does_not_write_back():
+    seen = []
+    oauth = make(TokenSession(), refresh="rt-1")  # session returns refresh_token "rt-1"
+    oauth.set_refresh_token("rt-1", on_change=seen.append)
+    oauth.authorization_header()
+    assert seen == []

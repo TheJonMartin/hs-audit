@@ -20,9 +20,12 @@ from .errors import AuthError, HubSpotError
 from .probes import ACCOUNT_INFO_PATH, PROBES
 from .receiver import (
     DEFAULT_KEY_PATH,
+    delete_client,
     fetch_refresh_token,
     generate_keypair,
+    list_clients,
     new_signed_state,
+    store_refresh_token,
 )
 from .scopes import OPTIONAL_SCOPES, REQUIRED_SCOPES
 
@@ -78,14 +81,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=AUTH_SERVICE_KEY,
         help="service-key (default) or oauth (public app install).",
     )
+    run.add_argument("--portal", help="HubSpot portal id of an installed client (stored token).")
     run.add_argument(
         "--state",
-        help="Install state from `install-url`; fetches the token the Netlify receiver stored.",
+        help="Install state from `install-url`; resolves to the portal it installed (24h).",
     )
     url = sub.add_parser(
         "install-url", help="Create a signed install link for one prospect (hosted receiver)."
     )
     url.add_argument("--state", help="Reuse an existing state instead of creating one.")
+    sub.add_parser("clients", help="List installed portals held by the receiver.")
+    revoke = sub.add_parser("revoke", help="Offboard a client: delete the stored token.")
+    revoke.add_argument("--portal", required=True)
     sub.add_parser("keygen", help="Create the keypair that protects tokens stored by the receiver.")
     return parser
 
@@ -99,7 +106,7 @@ def execute_run(args: argparse.Namespace, context: dict) -> Path:
     numbers = parse_categories(args.categories, set(available))
 
     now = datetime.now(timezone.utc)
-    auth = build_auth(args.auth, getattr(args, "state", None))
+    auth = build_auth(args.auth, getattr(args, "state", None), getattr(args, "portal", None))
     client = HubSpotClient(auth=auth)
     ctx = AuditContext(client=client, now=now, sample_size=args.sample_size)
 
@@ -148,23 +155,33 @@ def oauth_from_env() -> OAuthAuth:
     )
 
 
-def build_auth(mode: str, state: str | None = None) -> AuthProvider:
+def _receiver_settings() -> tuple[str, str, Path]:
+    return (
+        os.environ.get("TOKEN_RECEIVER_URL", ""),
+        os.environ.get("TOKEN_FETCH_SECRET", ""),
+        Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH),
+    )
+
+
+def build_auth(mode: str, state: str | None = None, portal: str | None = None) -> AuthProvider:
     """Create the auth provider.
 
-    OAuth order: ``--state`` (token stored by the Netlify receiver), then HUBSPOT_REFRESH_TOKEN,
-    then an interactive localhost install.
+    OAuth order: ``--portal`` or ``--state`` (token held by the Netlify receiver), then
+    HUBSPOT_REFRESH_TOKEN, then an interactive localhost install.
     """
     if mode == AUTH_SERVICE_KEY:
         return StaticKeyAuth(os.environ.get("HUBSPOT_SERVICE_KEY", ""))
     oauth = oauth_from_env()
-    if state:
+    if portal or state:
+        url, fetch_secret, key_path = _receiver_settings()
         fetched = fetch_refresh_token(
-            os.environ.get("TOKEN_RECEIVER_URL", ""),
-            os.environ.get("TOKEN_FETCH_SECRET", ""),
-            state,
-            Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH),
+            url, fetch_secret, portal=portal, state=state, private_key_path=key_path
         )
-        oauth.set_refresh_token(fetched["refresh_token"])
+        hub_id = str(fetched["hub_id"])
+        oauth.set_refresh_token(
+            fetched["refresh_token"],
+            on_change=lambda token: store_refresh_token(url, fetch_secret, hub_id, token, key_path),
+        )
     elif not os.environ.get("HUBSPOT_REFRESH_TOKEN"):
         run_loopback_flow(
             oauth,
@@ -190,6 +207,22 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv_if_present()
     args = build_parser().parse_args(argv)
+    if args.command == "clients":
+        url, fetch_secret, _ = _receiver_settings()
+        for client in list_clients(url, fetch_secret):
+            print(
+                f"{client['hub_id']}\tinstalled={client.get('installed_at')}"
+                f"\tlast_used={client.get('last_used')}\tscopes={len(client.get('scopes', []))}"
+            )
+        return 0
+    if args.command == "revoke":
+        url, fetch_secret, _ = _receiver_settings()
+        delete_client(url, fetch_secret, args.portal)
+        print(
+            f"Stored token for portal {args.portal} deleted. Ask the client to uninstall "
+            "the app in HubSpot (Settings, Integrations, Connected Apps) to end access fully."
+        )
+        return 0
     if args.command == "keygen":
         public_pem = generate_keypair(
             Path(os.environ.get("TOKEN_PRIVATE_KEY_PATH") or DEFAULT_KEY_PATH)

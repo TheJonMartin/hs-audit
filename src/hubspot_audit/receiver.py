@@ -79,42 +79,109 @@ def decrypt_ciphertext(ciphertext_b64: str, private_key_path: Path) -> dict:
         raise AuthError(f"Could not decrypt the stored token: {type(exc).__name__}") from exc
 
 
-def fetch_refresh_token(
+def _request(
+    method: str,
     receiver_url: str,
+    path: str,
     fetch_secret: str,
-    state: str,
-    private_key_path: Path = DEFAULT_KEY_PATH,
+    params: dict | None = None,
+    body: dict | None = None,
     session: requests.Session | None = None,
 ) -> dict:
-    """Fetch (one time) and decrypt the refresh token stored for ``state``.
-
-    Returns ``{"refresh_token", "hub_id", "scopes"}``. The receiver deletes the token on read,
-    so a failed run after this point needs a fresh install.
-
-    Raises:
-        AuthError: missing config, HTTP failure (404 not found, 410 expired), or bad decrypt.
-    """
+    """Call the receiver. Errors name the failure, never echo a body or secret."""
     if not receiver_url or not fetch_secret:
         raise AuthError("TOKEN_RECEIVER_URL and TOKEN_FETCH_SECRET are required.")
     http = session or requests.Session()
     try:
-        response = http.get(
-            receiver_url.rstrip("/") + "/api/token",
-            params={"state": state},
+        response = http.request(
+            method,
+            receiver_url.rstrip("/") + path,
+            params=params,
+            json=body,
             headers={"Authorization": f"Bearer {fetch_secret}"},
             timeout=FETCH_TIMEOUT_SECONDS,
         )
     except requests.RequestException as exc:
-        raise AuthError(f"Token fetch failed: {type(exc).__name__}") from exc
+        raise AuthError(f"Token receiver request failed: {type(exc).__name__}") from exc
     if response.status_code != 200:
-        reason = {404: "not found (not installed yet, or already fetched)", 410: "expired"}.get(
-            response.status_code, f"HTTP {response.status_code}"
-        )
-        raise AuthError(f"Token fetch failed: {reason}")
-    body = response.json()
+        reason = {
+            404: "not found (not installed, or removed)",
+            410: "install link expired; use --portal instead",
+        }.get(response.status_code, f"HTTP {response.status_code}")
+        raise AuthError(f"Token receiver request failed: {reason}")
+    return response.json()
+
+
+def fetch_refresh_token(
+    receiver_url: str,
+    fetch_secret: str,
+    *,
+    portal: str | None = None,
+    state: str | None = None,
+    private_key_path: Path = DEFAULT_KEY_PATH,
+    session: requests.Session | None = None,
+) -> dict:
+    """Read and decrypt the refresh token stored for a portal (or for an install ``state``).
+
+    Reads are repeatable; the token stays on the receiver until the client is removed.
+    Returns ``{"refresh_token", "hub_id", "scopes"}``.
+
+    Raises:
+        AuthError: missing config, receiver failure, or a bad decrypt.
+    """
+    if bool(portal) == bool(state):
+        raise AuthError("Pass exactly one of portal or state.")
+    params = {"portal": portal} if portal else {"state": state}
+    body = _request("GET", receiver_url, "/api/token", fetch_secret, params, session=session)
     payload = decrypt_ciphertext(body["ciphertext"], private_key_path)
     return {
         "refresh_token": payload["refresh_token"],
         "hub_id": body.get("hub_id"),
         "scopes": body.get("scopes", []),
     }
+
+
+def _public_key(private_key_path: Path):
+    key = serialization.load_pem_private_key(private_key_path.read_bytes(), password=None)
+    return key.public_key()
+
+
+def store_refresh_token(
+    receiver_url: str,
+    fetch_secret: str,
+    portal: str,
+    refresh_token: str,
+    private_key_path: Path = DEFAULT_KEY_PATH,
+    session: requests.Session | None = None,
+) -> None:
+    """Re-encrypt and store a refresh token HubSpot has rotated, so the next run still works."""
+    try:
+        cipher = _public_key(private_key_path).encrypt(
+            json.dumps({"refresh_token": refresh_token}).encode(),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None
+            ),
+        )
+    except (OSError, ValueError) as exc:
+        raise AuthError(f"Could not encrypt the rotated token: {type(exc).__name__}") from exc
+    _request(
+        "PUT",
+        receiver_url,
+        "/api/token",
+        fetch_secret,
+        {"portal": portal},
+        {"ciphertext": base64.b64encode(cipher).decode()},
+        session,
+    )
+
+
+def list_clients(receiver_url: str, fetch_secret: str, session=None) -> list[dict]:
+    """Installed portals with install date, scopes and last use. No token material."""
+    return _request("GET", receiver_url, "/api/clients", fetch_secret, session=session)["clients"]
+
+
+def delete_client(receiver_url: str, fetch_secret: str, portal: str, session=None) -> None:
+    """Offboard: delete the stored token. The client must still uninstall the app in HubSpot."""
+    _request(
+        "DELETE", receiver_url, "/api/token", fetch_secret, {"portal": portal}, session=session
+    )

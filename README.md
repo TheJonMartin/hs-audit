@@ -76,30 +76,43 @@ Tokens are kept in memory for the run and never written to disk. In this mode th
 
 ### Hosted receiver (Netlify)
 
-A prospect can install the app on their own: the Netlify receiver in `netlify/` catches HubSpot's redirect, exchanges the code, encrypts the refresh token to our public key and stores only the ciphertext in Netlify Blobs. `hubspot-audit run --auth oauth --state <state>` then fetches it once, decrypts it locally and deletes it from Netlify.
+A prospect or client installs the app on their own. The Netlify receiver in `netlify/` catches HubSpot's redirect, exchanges the code, encrypts the refresh token to our public key and **keeps** the ciphertext in Netlify Blobs, keyed by portal ID, so audits can be rerun (for example monthly) without another install. A reinstall replaces the stored token.
 
 ```
-prospect admin --install link--> HubSpot --redirect--> Netlify /oauth/callback
-                                                         | exchange code, encrypt, store (Blobs)
-CLI: run --auth oauth --state S --> Netlify /api/token --> ciphertext (deleted on read, 24h expiry)
-                                    decrypt with local private key, hold in memory for the run
+client admin --install link--> HubSpot --redirect--> Netlify /oauth/callback
+                                                        | exchange code, encrypt, store portal/<id>
+CLI / scheduler: run --auth oauth --portal ID --> Netlify /api/token --> ciphertext
+                 decrypt with private key, hold in memory for the run
 ```
+
+Receiver endpoints (all need the bearer `TOKEN_FETCH_SECRET`):
+
+| Call | Purpose |
+| --- | --- |
+| `GET /api/token?portal=ID` or `?state=S` | Read the ciphertext (repeatable; records `last_used`). `state` resolves to a portal for 24 hours after install. |
+| `PUT /api/token?portal=ID` | Replace the ciphertext. The CLI does this automatically if HubSpot ever rotates a refresh token, and fails the run if the write-back fails (a lost rotated token would break the next run). |
+| `DELETE /api/token?portal=ID` | Offboard a client. |
+| `GET /api/clients` | List installed portals: install date, last use, scopes. No token material. |
 
 Setup, once:
 
-1. **Keys.** `hubspot-audit keygen` writes the private key to `~/.hubspot-audit/token_private.pem` (mode 600, never overwritten) and prints the public key. Back the private key up: without it stored tokens cannot be read.
+1. **Keys.** `hubspot-audit keygen` writes the private key to `~/.hubspot-audit/token_private.pem` (mode 600, never overwritten) and prints the public key. Back the private key up: without it stored tokens cannot be read. Any machine that runs scheduled audits needs this key (store it as a secret in that runner, never in the repo).
 2. **Secrets.** Generate two random values, for example `openssl rand -hex 32`: `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`.
 3. **Netlify site.** Create a site from this repo (`netlify.toml` is at the root). Set these environment variables: `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` (`https://<site>/oauth/callback`), `STATE_SIGNING_SECRET`, `TOKEN_FETCH_SECRET`, `TOKEN_PUBLIC_KEY_PEM` (the printed public key), `ERROR_ROUTER_URL`, `FLOW_ID`, `FLOW_NAME`, `PLATFORM_NAME=OTHER`. Mark the secrets as secret in Netlify.
 4. **HubSpot app.** Register `https://<site>/oauth/callback` as the redirect URI.
 5. **Local `.env`.** Set `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`, `HUBSPOT_REDIRECT_URI` (same as `OAUTH_REDIRECT_URI`), `TOKEN_RECEIVER_URL` (`https://<site>`), `STATE_SIGNING_SECRET` and `TOKEN_FETCH_SECRET`.
 
-Per prospect:
+Per client:
 
 1. `hubspot-audit install-url` prints a signed install link and a state value. Send the link with `prospect/install_instructions_oauth.md`.
-2. When the prospect confirms, `hubspot-audit run --auth oauth --state <state>`.
-3. If the run fails after the token is fetched, the token is already deleted from Netlify; the prospect must reinstall (about 5 minutes).
+2. After they install: `hubspot-audit run --auth oauth --state <state>` (first run, within 24 hours), then `--portal <hub id>` for every later run. `hubspot-audit clients` lists portal IDs.
+3. To offboard: `hubspot-audit revoke --portal <id>` deletes the stored token. The client must also uninstall the app in HubSpot to end access completely; revoke only removes our copy.
 
-Security properties: the state is HMAC-signed so the receiver rejects installs we did not create; Netlify holds only RSA-OAEP ciphertext, readable only with our private key; the fetch endpoint needs a bearer secret, reads once, and expires entries after 24 hours; no codes, tokens or HubSpot response bodies are logged or sent to the error router. During the callback the function briefly holds the plaintext token and client secret in memory. The prospect's access ends when they uninstall the app.
+Security properties: the state is HMAC-signed so the receiver rejects installs we did not create; Netlify holds only RSA-OAEP ciphertext, readable only with our private key; every receiver call needs the bearer secret; no codes, tokens or HubSpot response bodies are logged or sent to the error router. During the callback the function briefly holds the plaintext token and client secret in memory.
+
+What persistent storage means: we hold long-lived read access to each client's portal until they uninstall or we revoke. The exposure is the Netlify secrets plus the private key together (either alone is not enough). Treat the private key and `TOKEN_FETCH_SECRET` as production credentials, rotate them if a laptop is lost, and keep the per-client revoke path working.
+
+Not built yet: the monthly scheduler (it needs a runner that holds the private key and the receiver secrets), per-client config, and keeping a history of bundles to compare month over month.
 
 Local tests: `cd netlify && npm install && npm test`. The Python suite also checks that Node-encrypted tokens decrypt in Python and that both sides compute the same state signature.
 

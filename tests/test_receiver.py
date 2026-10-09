@@ -71,8 +71,8 @@ class Receiver:
     def __init__(self, status=200, body=None):
         self.status, self.body, self.calls = status, body or {}, []
 
-    def get(self, url, params=None, headers=None, timeout=None):
-        self.calls.append((url, params, headers))
+    def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+        self.calls.append((method, url, params, json, headers))
         return FakeResponse(self.status, self.body)
 
 
@@ -92,24 +92,84 @@ def test_fetch_decrypts_and_sends_bearer_secret(tmp_path):
     fake = Receiver(
         body={"ciphertext": base64.b64encode(cipher).decode(), "hub_id": 7, "scopes": ["a"]}
     )
-    out = receiver.fetch_refresh_token("https://site.test/", "fs", "N.S", key_path, session=fake)
+    out = receiver.fetch_refresh_token(
+        "https://site.test/", "fs", state="N.S", private_key_path=key_path, session=fake
+    )
     assert out == {"refresh_token": "RT", "hub_id": 7, "scopes": ["a"]}
-    url, params, headers = fake.calls[0]
-    assert url == "https://site.test/api/token" and params == {"state": "N.S"}
+    method, url, params, _, headers = fake.calls[0]
+    assert (method, url, params) == ("GET", "https://site.test/api/token", {"state": "N.S"})
     assert headers["Authorization"] == "Bearer fs"
+    receiver.fetch_refresh_token(
+        "https://site.test", "fs", portal="7", private_key_path=key_path, session=fake
+    )
+    assert fake.calls[1][2] == {"portal": "7"}
 
 
 @pytest.mark.parametrize("status,word", [(404, "not found"), (410, "expired"), (401, "401")])
 def test_fetch_errors_are_specific_and_leak_nothing(status, word, tmp_path):
-    with pytest.raises(AuthError, match=word):
+    with pytest.raises(AuthError, match=word) as exc:
         receiver.fetch_refresh_token(
-            "https://s", "secret", "N.S", tmp_path / "k", session=Receiver(status)
+            "https://s",
+            "secret",
+            state="N.S",
+            private_key_path=tmp_path / "k",
+            session=Receiver(status),
         )
+    assert "secret" not in str(exc.value)
 
 
-def test_fetch_requires_config(tmp_path):
+def test_fetch_requires_config_and_exactly_one_identifier(tmp_path):
+    key = tmp_path / "k"
     with pytest.raises(AuthError):
-        receiver.fetch_refresh_token("", "", "s", tmp_path / "k")
+        receiver.fetch_refresh_token("", "", portal="1", private_key_path=key)
+    with pytest.raises(AuthError):
+        receiver.fetch_refresh_token("u", "s", private_key_path=key)
+    with pytest.raises(AuthError):
+        receiver.fetch_refresh_token("u", "s", portal="1", state="x", private_key_path=key)
+
+
+def test_fetch_by_portal_sends_portal_param(tmp_path):
+    key = tmp_path / "k.pem"
+    receiver.generate_keypair(key)
+    fake = Receiver(body={"ciphertext": "AAAA", "hub_id": 7})
+    with pytest.raises(AuthError):  # ciphertext is junk; we only care about the request shape
+        receiver.fetch_refresh_token(
+            "https://s", "fs", portal="7", private_key_path=key, session=fake
+        )
+    assert fake.calls[0][2] == {"portal": "7"}
+
+
+def test_store_refresh_token_encrypts_before_sending(tmp_path):
+    key_path = tmp_path / "k.pem"
+    receiver.generate_keypair(key_path)
+    fake = Receiver(body={"ok": True})
+    receiver.store_refresh_token("https://s", "fs", "7", "NEW-RT", key_path, session=fake)
+    method, _, params, body, _ = fake.calls[0]
+    assert (method, params) == ("PUT", {"portal": "7"})
+    assert "NEW-RT" not in json.dumps(body)
+    assert receiver.decrypt_ciphertext(body["ciphertext"], key_path) == {"refresh_token": "NEW-RT"}
+
+
+def test_list_and_delete_clients():
+    fake = Receiver(body={"clients": [{"hub_id": "7"}], "ok": True})
+    assert receiver.list_clients("https://s", "fs", session=fake) == [{"hub_id": "7"}]
+    receiver.delete_client("https://s", "fs", "7", session=fake)
+    assert [c[0] for c in fake.calls] == ["GET", "DELETE"]
+
+
+def test_build_auth_with_portal_wires_rotation_writeback(monkeypatch):
+    monkeypatch.setenv("HUBSPOT_CLIENT_ID", "cid")
+    monkeypatch.setenv("HUBSPOT_CLIENT_SECRET", "cs")
+    stored = []
+    monkeypatch.setattr(
+        cli,
+        "fetch_refresh_token",
+        lambda *a, **k: {"refresh_token": "RT-1", "hub_id": 7, "scopes": []},
+    )
+    monkeypatch.setattr(cli, "store_refresh_token", lambda *a: stored.append(a[3]))
+    auth = cli.build_auth("oauth", portal="7")
+    auth._on_refresh_token_change("RT-2")
+    assert stored == ["RT-2"]
 
 
 def test_decrypt_with_wrong_key_is_auth_error(tmp_path):

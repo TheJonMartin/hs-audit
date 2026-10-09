@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { test } from "node:test";
-import { createCallbackHandler, createFetchHandler } from "../functions/lib/handlers.mjs";
+import { createCallbackHandler, createTokenHandler } from "../functions/lib/handlers.mjs";
 import { encryptPayload, signNonce, verifyState } from "../functions/lib/security.mjs";
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 3072 });
@@ -21,6 +21,7 @@ class Store {
   async getWithMetadata(k) { return this.data.get(k) ?? null; }
   async set(k, data, { metadata }) { this.data.set(k, { data, metadata }); }
   async delete(k) { this.data.delete(k); }
+  async list({ prefix }) { return { blobs: [...this.data.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) }; }
 }
 
 const hubspot = (calls = []) => async (url, init) => {
@@ -43,9 +44,10 @@ test("callback stores only ciphertext that the private key decrypts", async () =
   const calls = [];
   const res = await createCallbackHandler({ env: ENV, store, fetchImpl: hubspot(calls), now: () => 1000 })(req(`/oauth/callback?code=thecode&state=${STATE}`));
   assert.equal(res.status, 200);
-  const stored = store.data.get(NONCE);
+  const stored = store.data.get("portal/99");
   assert.ok(!stored.data.includes("RT-SECRET-123"));
-  assert.deepEqual(stored.metadata, { stored_at: 1000, hub_id: 99, scopes: ["a", "b"] });
+  assert.deepEqual(stored.metadata, { stored_at: 1000, installed_at: 1000, last_used: null, scopes: ["a", "b"] });
+  assert.deepEqual(JSON.parse(store.data.get(`state/${NONCE}`).data), { hub_id: "99" });
   const plain = crypto.privateDecrypt({ key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(stored.data, "base64"));
   assert.equal(JSON.parse(plain).refresh_token, "RT-SECRET-123");
   assert.ok(!JSON.stringify(stored).includes("someone@example.com"));
@@ -87,22 +89,70 @@ test("router retries 5xx once and never retries 4xx", async () => {
   assert.equal(n, 1);
 });
 
-test("fetch handler: auth, one-time read, expiry", async () => {
+const AUTH = { authorization: "Bearer fetch-secret" };
+const seeded = async (now = () => 2000) => {
   const store = new Store();
-  await store.set(NONCE, "CIPHERTEXT", { metadata: { stored_at: 1000, hub_id: 99, scopes: ["a"] } });
-  const handler = createFetchHandler({ env: ENV, store, now: () => 2000 });
-  const auth = { authorization: "Bearer fetch-secret" };
-  assert.equal((await handler(req(`/api/token?state=${STATE}`))).status, 401);
-  assert.equal((await handler(req(`/api/token?state=${STATE}`, { authorization: "Bearer wrong" }))).status, 401);
-  assert.equal((await handler(req(`/api/token?state=${NONCE}.bad`, auth))).status, 400);
-  const ok = await handler(req(`/api/token?state=${STATE}`, auth));
-  assert.deepEqual(await ok.json(), { ciphertext: "CIPHERTEXT", hub_id: 99, scopes: ["a"], stored_at: 1000 });
-  assert.equal((await handler(req(`/api/token?state=${STATE}`, auth))).status, 404);
+  await store.set("portal/99", "CIPHERTEXT", { metadata: { stored_at: 1000, installed_at: 1000, last_used: null, scopes: ["a"] } });
+  await store.set(`state/${NONCE}`, JSON.stringify({ hub_id: "99" }), { metadata: { stored_at: 1000 } });
+  return { store, handler: createTokenHandler({ env: ENV, store, now }) };
+};
 
-  await store.set(NONCE, "OLD", { metadata: { stored_at: 0 } });
-  const late = createFetchHandler({ env: ENV, store, now: () => 25 * 3600 * 1000 });
-  assert.equal((await late(req(`/api/token?state=${STATE}`, auth))).status, 410);
-  assert.equal(store.data.size, 0);
+test("token handler requires the bearer secret and valid identifiers", async () => {
+  const { handler } = await seeded();
+  assert.equal((await handler(req("/api/token?portal=99"))).status, 401);
+  assert.equal((await handler(req("/api/token?portal=99", { authorization: "Bearer wrong" }))).status, 401);
+  assert.equal((await handler(req("/api/token?portal=../x", AUTH))).status, 400);
+  assert.equal((await handler(req(`/api/token?state=${NONCE}.bad`, AUTH))).status, 400);
+  assert.equal((await handler(req("/api/token?portal=12345", AUTH))).status, 404);
+});
+
+test("token reads are repeatable, resolve by state or portal, and record last_used", async () => {
+  const { store, handler } = await seeded(() => 5000);
+  for (const q of ["portal=99", `state=${STATE}`, "portal=99"]) {
+    const res = await handler(req(`/api/token?${q}`, AUTH));
+    assert.deepEqual(await res.json(), { hub_id: "99", ciphertext: "CIPHERTEXT", scopes: ["a"], installed_at: 1000 });
+  }
+  assert.equal(store.data.get("portal/99").metadata.last_used, 5000);
+  assert.equal(store.data.get("portal/99").data, "CIPHERTEXT");
+});
+
+test("state lookup expires after 24h but the portal token does not", async () => {
+  const { handler } = await seeded(() => 25 * 3600 * 1000);
+  assert.equal((await handler(req(`/api/token?state=${STATE}`, AUTH))).status, 410);
+  assert.equal((await handler(req("/api/token?portal=99", AUTH))).status, 200);
+});
+
+test("PUT replaces the ciphertext; DELETE offboards", async () => {
+  const { store, handler } = await seeded();
+  const put = (body) => handler(new Request("https://x/api/token?portal=99", { method: "PUT", headers: AUTH, body: JSON.stringify(body) }));
+  assert.equal((await put({})).status, 400);
+  assert.equal((await put({ ciphertext: "NEW" })).status, 200);
+  assert.equal(store.data.get("portal/99").data, "NEW");
+  assert.equal(store.data.get("portal/99").metadata.installed_at, 1000);
+  const del = await handler(new Request("https://x/api/token?portal=99", { method: "DELETE", headers: AUTH }));
+  assert.equal(del.status, 200);
+  assert.equal((await handler(req("/api/token?portal=99", AUTH))).status, 404);
+  assert.equal((await handler(new Request("https://x/api/token?portal=99", { method: "POST", headers: AUTH }))).status, 405);
+});
+
+test("clients list shows metadata without ciphertext", async () => {
+  const { handler } = await seeded();
+  const body = await (await handler(req("/api/clients", AUTH))).json();
+  assert.deepEqual(body, { clients: [{ hub_id: "99", stored_at: 1000, installed_at: 1000, last_used: null, scopes: ["a"] }] });
+  assert.ok(!JSON.stringify(body).includes("CIPHERTEXT"));
+  assert.equal((await handler(req("/api/clients"))).status, 401);
+});
+
+test("reinstalling the same portal replaces the stored token", async () => {
+  const store = new Store();
+  const n2 = "zyxwvutsrqponmlkjihgfedcba987654";
+  const state2 = `${n2}.${signNonce(n2, SECRET)}`;
+  const handler = createCallbackHandler({ env: ENV, store, fetchImpl: hubspot(), now: () => 1 });
+  await handler(req(`/oauth/callback?code=c&state=${STATE}`));
+  const first = store.data.get("portal/99").data;
+  await handler(req(`/oauth/callback?code=c&state=${state2}`));
+  assert.notEqual(store.data.get("portal/99").data, first); // RSA-OAEP is randomized
+  assert.equal([...store.data.keys()].filter((k) => k.startsWith("portal/")).length, 1);
 });
 
 test("encryptPayload refuses payloads larger than the key allows", () => {
@@ -111,5 +161,5 @@ test("encryptPayload refuses payloads larger than the key allows", () => {
 
 test("missing configuration fails fast", () => {
   assert.throws(() => createCallbackHandler({ env: { ...ENV, ERROR_ROUTER_URL: "" }, store: new Store() }), /ERROR_ROUTER_URL/);
-  assert.throws(() => createFetchHandler({ env: {}, store: new Store() }), /Missing/);
+  assert.throws(() => createTokenHandler({ env: {}, store: new Store() }), /Missing/);
 });
