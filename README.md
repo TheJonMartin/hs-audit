@@ -1,6 +1,6 @@
 # hubspot-audit
 
-Read-only HubSpot portal audit extractor for Process Pro Consulting. It pulls a prospect's portal with a read-only Service Key, computes aggregate metrics locally, and writes an audit bundle that Claude turns into the internal audit report.
+Read-only HubSpot portal audit extractor for Process Pro Consulting. It pulls a prospect's portal with a read-only Service Key or by installing our public app (OAuth), computes aggregate metrics locally, and writes an audit bundle that Claude turns into the internal audit report.
 
 Status: v0.1.0. Built and unit-tested against a fake portal. **Not yet run against a live HubSpot portal**; see [Verification status](#verification-status).
 
@@ -60,6 +60,22 @@ Contact-level metrics use a sample (default 1,000 most recently created contacts
 
 Every metric has `key`, `value`, `unit`, `source`, `status` (`ok`, `empty`, `forbidden`, `unsupported`, `error`) and an optional `note`. A non-`ok` status means the value is `null`: a gap, not a zero. Gaps flow into the report's Open Questions. CSV cells are scrubbed of email-like strings (the count is in `meta.csv_email_redactions`).
 
+## OAuth (public app) mode
+
+`hubspot-audit run --auth oauth` authenticates through the Process Pro public app instead of a Service Key. The prospect's admin installs the app and approves the read scopes in `src/hubspot_audit/scopes.py`; send them `prospect/install_instructions_oauth.md`.
+
+Setup, once, in the HubSpot developer account: create the app, set the redirect URI to match `HUBSPOT_REDIRECT_URI`, declare the scopes (required and optional), and put the client ID and secret in `.env`.
+
+| Mode | When | How |
+| --- | --- | --- |
+| Interactive install | The approver is on a call with the person running the audit | `run --auth oauth` prints the install URL and listens on `http://localhost:8765/callback` for one redirect |
+| Existing token | A hosted receiver already holds the token | Set `HUBSPOT_REFRESH_TOKEN`; no install step |
+| URL only | Send the link ahead of time | `hubspot-audit install-url` |
+
+Tokens are kept in memory for the run and never written to disk. In this mode the bundle's `meta.oauth_scopes_granted` lists the scopes HubSpot actually granted (more reliable than the probe-based `scopes_granted`).
+
+Not built yet: a hosted callback receiver. The localhost redirect only completes when the approver's browser is on the machine running the tool, so a prospect installing on their own needs a hosted receiver that exchanges the code and hands us a token. That also means storing a refresh token, so settle the data-agreement and retention questions first.
+
 ## Error handling
 
 Per-endpoint failures (a 403, an unsupported endpoint) are recorded in the bundle and the run continues. Failures that make the bundle untrustworthy (rejected key, schema validation failure, a Service Key found in output) go to the global handler in `cli.py`, which posts the Unified Error Payload to the Central Error Router (5 s timeout, one retry on network error or 5xx, never on 4xx) and re-raises.
@@ -92,6 +108,10 @@ Items with uncertain coverage are built, and fall back to the screenshot checkli
 Not available from the API at all: user last login, sandbox, dashboards and reports, connected apps, sync errors, ad accounts, consent settings.
 
 Beta endpoints: `/automation/v4/flows`, `/automation/v4/sequences`.
+
+## Verification status (OAuth)
+
+OAuth flow tested against fakes only (refresh, 401 retry, state check, no secret in errors). Unconfirmed against HubSpot: whether `http://localhost` is accepted as a redirect URI, how required versus optional scopes are declared in the current developer platform, who can approve the install, any install cap before marketplace listing, and that `/oauth/v1/access-tokens/{token}` is still the introspection endpoint.
 
 ## Verification status
 

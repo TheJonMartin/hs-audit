@@ -34,6 +34,7 @@ def assemble(
     areas_granted: list[str],
     probes: list[dict[str, str]],
     sample_size: int,
+    auth_mode: str = "service-key",
 ) -> dict[str, Any]:
     """Build the bundle dict from category results."""
     return {
@@ -46,6 +47,7 @@ def assemble(
             "scope_probes": probes,
             "categories_run": [r.number for r in results],
             "contact_sample_size": sample_size,
+            "auth_mode": auth_mode,
         },
         "categories": {
             str(r.number): {
@@ -58,8 +60,8 @@ def assemble(
     }
 
 
-def validate(bundle: dict[str, Any], service_key: str) -> None:
-    """Validate against the schema, require unique metric keys per category, and check the key is absent.
+def validate(bundle: dict[str, Any], secret_values: list[str] | str) -> None:
+    """Validate against the schema, require unique metric keys per category, and check no credential is present.
 
     Raises:
         BundleValidationError: any check fails.
@@ -81,8 +83,10 @@ def validate(bundle: dict[str, Any], service_key: str) -> None:
                     f"Duplicate metric key in category {number}: {item['key']}"
                 )
             seen.add(item["key"])
-    if service_key and service_key in json.dumps(bundle):
-        raise BundleValidationError("Service Key found in bundle output.")
+    blob = json.dumps(bundle)
+    values = [secret_values] if isinstance(secret_values, str) else secret_values
+    if any(v and v in blob for v in values):
+        raise BundleValidationError("A credential was found in the bundle output.")
 
 
 def redact_cell(value: Any) -> tuple[Any, int]:

@@ -11,15 +11,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, bundle
+from .auth import AuthProvider, OAuthAuth, StaticKeyAuth, run_loopback_flow
 from .categories import CategoryResult, registry
 from .client import HubSpotClient
 from .context import DEFAULT_SAMPLE_SIZE, AuditContext
 from .error_router import handle_failure, load_router_config
 from .errors import AuthError, HubSpotError
 from .probes import ACCOUNT_INFO_PATH, PROBES
+from .scopes import OPTIONAL_SCOPES, REQUIRED_SCOPES
 
 logger = logging.getLogger("hubspot_audit")
 DEFAULT_OUTPUT_DIR = "output"
+DEFAULT_REDIRECT_URI = "http://localhost:8765/callback"
+AUTH_SERVICE_KEY = "service-key"
+AUTH_OAUTH = "oauth"
 
 
 def load_dotenv_if_present(path: Path = Path(".env")) -> None:
@@ -61,12 +66,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE)
     run.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     run.add_argument("--prospect", default=os.environ.get("PROSPECT_NAME"))
+    run.add_argument(
+        "--auth",
+        choices=[AUTH_SERVICE_KEY, AUTH_OAUTH],
+        default=AUTH_SERVICE_KEY,
+        help="service-key (default) or oauth (public app install).",
+    )
+    url = sub.add_parser("install-url", help="Print the OAuth install URL for the public app.")
+    url.add_argument("--state", default="manual")
     return parser
 
 
 def execute_run(args: argparse.Namespace, context: dict) -> Path:
     """Run the audit and return the output directory."""
-    service_key = os.environ.get("HUBSPOT_SERVICE_KEY", "")
     prospect = args.prospect
     if not prospect:
         raise ValueError("Prospect name is required: set PROSPECT_NAME or pass --prospect.")
@@ -74,7 +86,8 @@ def execute_run(args: argparse.Namespace, context: dict) -> Path:
     numbers = parse_categories(args.categories, set(available))
 
     now = datetime.now(timezone.utc)
-    client = HubSpotClient(service_key)
+    auth = build_auth(args.auth)
+    client = HubSpotClient(auth=auth)
     ctx = AuditContext(client=client, now=now, sample_size=args.sample_size)
 
     context["process_name"] = "Probing scopes"
@@ -92,15 +105,49 @@ def execute_run(args: argparse.Namespace, context: dict) -> Path:
     context["process_name"] = "Assembling bundle"
     probe_rows = [{"area": p.area, "endpoint": p.endpoint, "status": p.status} for p in probes]
     data = bundle.assemble(
-        results, prospect, portal_id, now, client.granted_areas(), probe_rows, args.sample_size
+        results,
+        prospect,
+        portal_id,
+        now,
+        client.granted_areas(),
+        probe_rows,
+        args.sample_size,
+        auth_mode=args.auth,
     )
+    if isinstance(auth, OAuthAuth):
+        data["meta"]["oauth_scopes_granted"] = auth.token_info()["scopes"]
     tables: dict[str, list] = {}
     for result in results:
         tables.update(result.tables)
-    bundle.validate(data, service_key)
+    bundle.validate(data, client.secrets)
     run_dir = bundle.write_outputs(data, tables, Path(args.output_dir), prospect, now)
     logger.info("Bundle written to %s (%s API calls)", run_dir, len(client.call_log))
     return run_dir
+
+
+def oauth_from_env() -> OAuthAuth:
+    """Build the OAuth provider from the environment."""
+    return OAuthAuth(
+        os.environ.get("HUBSPOT_CLIENT_ID", ""),
+        os.environ.get("HUBSPOT_CLIENT_SECRET", ""),
+        os.environ.get("HUBSPOT_REDIRECT_URI", DEFAULT_REDIRECT_URI),
+        refresh_token=os.environ.get("HUBSPOT_REFRESH_TOKEN") or None,
+    )
+
+
+def build_auth(mode: str) -> AuthProvider:
+    """Create the auth provider. OAuth uses HUBSPOT_REFRESH_TOKEN, else an interactive install."""
+    if mode == AUTH_SERVICE_KEY:
+        return StaticKeyAuth(os.environ.get("HUBSPOT_SERVICE_KEY", ""))
+    oauth = oauth_from_env()
+    if not os.environ.get("HUBSPOT_REFRESH_TOKEN"):
+        run_loopback_flow(
+            oauth,
+            REQUIRED_SCOPES,
+            OPTIONAL_SCOPES,
+            os.environ.get("HUBSPOT_REDIRECT_URI", DEFAULT_REDIRECT_URI),
+        )
+    return oauth
 
 
 def _portal_id(client: HubSpotClient) -> str | None:
@@ -118,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv_if_present()
     args = build_parser().parse_args(argv)
+    if args.command == "install-url":
+        print(oauth_from_env().authorization_url(REQUIRED_SCOPES, OPTIONAL_SCOPES, args.state))
+        return 0
     router = load_router_config()
     context = {
         "record_id": args.prospect,

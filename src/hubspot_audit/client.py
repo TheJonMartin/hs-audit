@@ -10,6 +10,7 @@ from typing import Any
 
 import requests
 
+from .auth import AuthProvider, StaticKeyAuth
 from .errors import ApiError, AuthError, ForbiddenError, HubSpotError, UnsupportedError
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ SEARCH_PAGE_SIZE = 100
 LIST_PAGE_SIZE = 100
 HTTP_OK_MAX = 299
 HTTP_TOO_MANY_REQUESTS = 429
+HTTP_UNAUTHORIZED = 401
 HTTP_SERVER_ERROR_MIN = 500
 UNSUPPORTED_STATUSES = frozenset({404, 405, 501})
 
@@ -67,15 +69,15 @@ class HubSpotClient:
 
     def __init__(
         self,
-        service_key: str,
+        service_key: str | None = None,
         session: requests.Session | None = None,
+        auth: AuthProvider | None = None,
         sleep=time.sleep,
         clock=time.monotonic,
     ) -> None:
-        if not service_key:
-            raise AuthError("HUBSPOT_SERVICE_KEY is not set.")
+        self._auth: AuthProvider = auth or StaticKeyAuth(service_key or "")
         self._session = session or requests.Session()
-        self._session.headers.update({"Authorization": f"Bearer {service_key}"})
+        self._session.headers.update({"Authorization": self._auth.authorization_header()})
         self._sleep = sleep
         self._clock = clock
         self._last_call = 0.0
@@ -102,8 +104,10 @@ class HubSpotClient:
         is_search = path.endswith("/search")
         min_interval = MIN_SEARCH_INTERVAL_SECONDS if is_search else MIN_INTERVAL_SECONDS
         status: int | None = None
+        refreshed = False
         for attempt in range(1, MAX_ATTEMPTS + 1):
             self._throttle(min_interval)
+            self._session.headers["Authorization"] = self._auth.authorization_header()
             try:
                 response = self._session.request(
                     method,
@@ -123,6 +127,9 @@ class HubSpotClient:
                 continue
 
             status = response.status_code
+            if status == HTTP_UNAUTHORIZED and not refreshed and self._auth.refresh():
+                refreshed = True  # token may have been revoked or expired mid-run; retry once
+                continue
             retryable = status == HTTP_TOO_MANY_REQUESTS or status >= HTTP_SERVER_ERROR_MIN
             if retryable and attempt < MAX_ATTEMPTS and status not in UNSUPPORTED_STATUSES:
                 self._sleep(self._retry_delay(response, attempt))
@@ -224,6 +231,11 @@ class HubSpotClient:
             results.append(ProbeResult(probe.area, probe.path, outcome))
         self.probe_results = results
         return results
+
+    @property
+    def secrets(self) -> list[str]:
+        """Secret values that must never appear in output."""
+        return self._auth.secrets()
 
     def granted_areas(self) -> list[str]:
         """Scope areas whose probe returned success."""
