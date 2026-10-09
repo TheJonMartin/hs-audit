@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 from hubspot_audit import metrics as m
 from hubspot_audit.errors import ForbiddenError
@@ -20,11 +20,7 @@ def test_population_rates_and_pct():
 def test_days_since_handles_iso_ms_and_junk():
     assert round(m.days_since("2026-10-08T00:00:00Z", NOW)) == 1
     assert (
-        round(
-            m.days_since(
-                str(int(datetime(2026, 10, 8, tzinfo=UTC).timestamp() * 1000)), NOW
-            )
-        )
+        round(m.days_since(str(int(datetime(2026, 10, 8, tzinfo=UTC).timestamp() * 1000)), NOW))
         == 1
     )
     assert m.days_since("", NOW) is None and m.days_since("garbage", NOW) is None
