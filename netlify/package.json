@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "scripts": { "test": "node --test test/handlers.test.mjs" },
-  "dependencies": { "@netlify/blobs": "^8.1.0" }
+  "dependencies": { "@netlify/blobs": "^11.1.3" }
 }
