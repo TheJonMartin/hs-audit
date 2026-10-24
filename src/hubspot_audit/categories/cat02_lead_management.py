@@ -7,14 +7,7 @@ from datetime import timedelta
 
 from ..context import RECENT_DAYS_LONG, RECENT_DAYS_SHORT, AuditContext
 from ..errors import AuthError, HubSpotError
-from ..metrics import (
-    distribution,
-    metric,
-    parse_hs_datetime,
-    pct,
-    safe,
-    safe_many,
-)
+from ..metrics import distribution, metric, parse_hs_datetime, pct, safe, safe_many
 from . import CategoryResult
 
 NUMBER = 2
