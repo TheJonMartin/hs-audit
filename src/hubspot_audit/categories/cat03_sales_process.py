@@ -4,15 +4,7 @@ from __future__ import annotations
 
 from ..context import ENGAGEMENT_OBJECTS, STALE_DAYS_LONG, STALE_DAYS_SHORT, AuditContext
 from ..errors import HubSpotError
-from ..metrics import (
-    average,
-    days_since,
-    distribution,
-    metric,
-    parse_hs_datetime,
-    safe,
-    safe_many,
-)
+from ..metrics import average, days_since, distribution, metric, parse_hs_datetime, safe, safe_many
 from . import CategoryResult
 
 NUMBER = 3
